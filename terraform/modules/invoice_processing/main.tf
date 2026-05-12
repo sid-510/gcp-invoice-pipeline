@@ -83,3 +83,97 @@ resource "google_project_iam_member" "runtime_log_writer" {
   role    = "roles/logging.logWriter"
   member  = "serviceAccount:${google_service_account.runtime.email}"
 }
+
+# -----------------------------------------------------------------------------
+# BigQuery: structured storage for extracted invoice data.
+# Brother asked for searchability for balance sheet preparation; BQ enables that.
+# -----------------------------------------------------------------------------
+
+resource "google_bigquery_dataset" "invoices" {
+  dataset_id  = "invoices_${var.environment}"
+  project     = var.project_id
+  location    = var.region
+  description = "Extracted invoice data for the family business pipeline."
+
+  # Protect against accidental deletion in non-dev.
+  delete_contents_on_destroy = var.environment == "dev"
+
+  labels = {
+    environment = var.environment
+    managed_by  = "terraform"
+    project     = "invoice-pipeline"
+  }
+}
+
+resource "google_bigquery_table" "invoices" {
+  dataset_id          = google_bigquery_dataset.invoices.dataset_id
+  table_id            = "invoices"
+  project             = var.project_id
+  deletion_protection = var.environment == "prod"  # prevent destroy in prod only
+
+  description = "One row per processed invoice. Raw extraction stored as JSON for re-processing."
+
+  # Partitioning by upload date keeps query costs low when filtering by time range.
+  time_partitioning {
+    type          = "DAY"
+    field         = "uploaded_at"
+    expiration_ms = null  # keep forever; lifecycle handled at row level if needed
+  }
+
+  # Clustering on vendor_gstin speeds up "show all invoices from this vendor" queries.
+  clustering = ["vendor_gstin"]
+
+  schema = jsonencode([
+    { name = "invoice_id",            type = "STRING",    mode = "REQUIRED", description = "UUID generated on upload" },
+    { name = "uploaded_at",           type = "TIMESTAMP", mode = "REQUIRED", description = "Upload time" },
+    { name = "source_filename",       type = "STRING",    mode = "NULLABLE", description = "Original filename" },
+    { name = "gcs_path",              type = "STRING",    mode = "REQUIRED", description = "gs:// path to the raw image" },
+    { name = "vendor_gstin",          type = "STRING",    mode = "NULLABLE", description = "15-char Indian GSTIN, validated" },
+    { name = "invoice_total",         type = "NUMERIC",   mode = "NULLABLE", description = "Grand total payable" },
+    { name = "taxable_value",         type = "NUMERIC",   mode = "NULLABLE", description = "Pre-tax value" },
+    { name = "cgst_amount",           type = "NUMERIC",   mode = "NULLABLE", description = "Central GST" },
+    { name = "sgst_amount",           type = "NUMERIC",   mode = "NULLABLE", description = "State GST" },
+    { name = "igst_amount",           type = "NUMERIC",   mode = "NULLABLE", description = "Integrated GST (inter-state)" },
+    { name = "invoice_date",          type = "DATE",      mode = "NULLABLE", description = "Invoice issue date" },
+    { name = "extraction_confidence", type = "FLOAT64",   mode = "NULLABLE", description = "Average field confidence" },
+    { name = "raw_extraction",        type = "JSON",      mode = "NULLABLE", description = "Full Document AI response for debugging" },
+    { name = "status",                type = "STRING",    mode = "REQUIRED", description = "extracted | verified | failed" },
+  ])
+
+  labels = {
+    environment = var.environment
+    managed_by  = "terraform"
+    project     = "invoice-pipeline"
+  }
+}
+
+# Grant the runtime service account permission to write to BigQuery.
+# dataEditor lets it insert rows and modify table data, but NOT delete the table
+# or change its schema. Tighter than bigquery.admin.
+resource "google_bigquery_dataset_iam_member" "runtime_data_editor" {
+  dataset_id = google_bigquery_dataset.invoices.dataset_id
+  project    = var.project_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+# The runtime SA also needs jobUser at project level to actually run insert jobs.
+# (Counter-intuitive but required: dataEditor lets you modify data; jobUser lets
+# you submit the query/insert jobs that do the modification.)
+resource "google_project_iam_member" "runtime_bigquery_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+# -----------------------------------------------------------------------------
+# Document AI: Invoice Parser processor.
+# Created in 'eu' multi-region (regional Document AI not supported for Invoice Parser).
+# -----------------------------------------------------------------------------
+
+resource "google_document_ai_processor" "invoice_parser" {
+  location     = var.documentai_region
+  display_name = "invoice-parser-${var.environment}"
+  type         = "INVOICE_PROCESSOR"
+  project      = var.project_id
+}

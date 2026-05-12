@@ -26,6 +26,7 @@ module "invoice_processing" {
 | region      | string | europe-west1     | GCP region                            |
 | environment | string | (required)       | dev / staging / prod                  |
 | name_prefix | string | invoice-pipeline | Prefix for resource names             |
+| documentai_region | string | eu | Multi-region for Document AI processor |
 
 ## Outputs
 
@@ -34,6 +35,10 @@ module "invoice_processing" {
 | invoice_bucket_name           | Name of the invoice bucket               |
 | invoice_bucket_url            | gs:// URL of the bucket                  |
 | runtime_service_account_email | Email of the runtime service account     |
+| bigquery_dataset_id | Dataset ID for the invoices dataset |
+| bigquery_table_id | Table ID for the invoices table |
+| documentai_processor_id | Full resource name of the Document AI processor |
+| documentai_processor_location | Region/multi-region where the processor lives |
 
 ## Design Notes
 

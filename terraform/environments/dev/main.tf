@@ -54,3 +54,15 @@ output "invoice_bucket_name" {
 output "runtime_service_account_email" {
   value = module.invoice_processing.runtime_service_account_email
 }
+
+output "bigquery_dataset_id" {
+  value = module.invoice_processing.bigquery_dataset_id
+}
+
+output "documentai_processor_id" {
+  value = module.invoice_processing.documentai_processor_id
+}
+
+output "documentai_processor_location" {
+  value = module.invoice_processing.documentai_processor_location
+}

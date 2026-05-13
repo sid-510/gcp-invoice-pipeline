@@ -1,0 +1,8 @@
+# Copy this file to terraform.tfvars and fill in your actual values.
+# The real terraform.tfvars is gitignored to keep environment-specific
+# values out of version control.
+
+project_id = "your-gcp-project-id"
+
+# region is optional - defaults to europe-west1 if not set.
+# region = "europe-west1"

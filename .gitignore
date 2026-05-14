@@ -36,6 +36,10 @@ test_invoices/
 !docs/**/*.png
 !docs/**/*.jpg
 
+# Extracted invoice data - contains real GSTINs and business info
+app/extraction_samples/
+extraction_samples/
+
 # IDE / Editor
 .vscode/
 .idea/

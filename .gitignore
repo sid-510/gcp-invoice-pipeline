@@ -26,6 +26,16 @@ gcp-key*.json
 .env.*
 credentials/
 
+# Sample / real test data - never commit
+app/test_invoices/
+test_invoices/
+*.pdf
+*.jpg
+*.jpeg
+*.png
+!docs/**/*.png
+!docs/**/*.jpg
+
 # IDE / Editor
 .vscode/
 .idea/

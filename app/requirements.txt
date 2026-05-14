@@ -1,0 +1,12 @@
+# Core web framework and production server
+flask==3.0.3
+gunicorn==22.0.0
+
+# GCP client libraries
+google-cloud-documentai==2.34.0
+google-cloud-storage==2.18.2
+google-cloud-bigquery==3.25.0
+google-cloud-logging==3.11.2
+
+# Utilities
+python-dotenv==1.0.1

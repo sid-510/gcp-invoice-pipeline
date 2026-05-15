@@ -108,6 +108,85 @@ the following structure to build Kubernetes depth:
 
 This will be documented in a separate ADR when work begins.
 
+## Known Extraction Patterns and Limitations
+
+Based on testing Document AI Invoice Parser against three real sample
+invoices from the family business, the following patterns are confirmed.
+These shape the post-processing layer of the application.
+
+### Reliable fields
+
+These are extracted consistently with high confidence and are safe to use
+directly from the Document AI response:
+
+- **`invoice_id`** — 96%+ confidence across all samples
+- **`supplier_tax_id` (GSTIN)** — 83-87% confidence, but the value is
+  always either correct or absent; partial extractions have not been
+  observed
+- **`supplier_email`** — extracts the actual vendor email reliably even
+  when supplier_name fails
+- **`line_item`** — 100% confidence for itemised product rows
+
+### Unreliable fields requiring post-processing
+
+These fields cannot be trusted as-is. The post-processing layer must
+validate and correct them.
+
+#### `supplier_name`
+Fails on certain invoice templates (observed: Vinayak Hardware
+template). Document AI returns the buyer's name in both `supplier_name`
+and `receiver_name` slots, ignoring the actual supplier entity even
+though it appears prominently on the document. The supplier's GSTIN
+and email extract correctly in these cases, so they serve as
+identifiers instead.
+
+**Mitigation:** Vendor identity is keyed on GSTIN, not supplier_name.
+See ADR 0004. A separate vendor lookup table maps GSTIN to canonical
+vendor name.
+
+#### `total_amount`
+Sometimes returns the words-form of the total (e.g., "Indian Rupees
+Seven Thousand One Hundred Fifty Only") instead of the numeric value.
+Confidence drops noticeably when this happens (13% vs 91-93% for
+numeric), making confidence-based filtering feasible.
+
+**Mitigation:** Post-processing validates that `total_amount` parses as
+a number. If not, fall back to one of: the `normalized_value` field,
+the largest numeric value in `line_items`, or regex on the OCR text.
+
+#### `invoice_date`
+Confidence varies widely across templates (52-94%). The value is
+usually correct even at low confidence, but warrants verification.
+
+**Mitigation:** Use the `normalized_value` (ISO format) where present.
+Where absent and confidence is low, flag for manual review.
+
+### GSTIN-specific handling
+
+Indian GSTINs follow a strict 15-character format with a checksum
+digit. Document AI extracts GSTINs reliably but does not validate the
+checksum. The post-processing layer applies regex validation and
+checksum verification before storing the GSTIN as authoritative.
+
+A GSTIN that extracts cleanly from Document AI but fails checksum
+validation indicates either an OCR error (one character misread) or a
+genuinely invalid GSTIN on the source document. Both cases route to
+manual review.
+
+### Confidence aggregation
+
+The `extraction_confidence` field stored in BigQuery is **not** the
+average of all entity confidences. It is computed as the minimum
+confidence across the *critical* fields:
+
+- supplier_tax_id (GSTIN)
+- total_amount
+- invoice_date
+
+Averaging across all 14-24 returned entities would mask low-confidence
+extraction of critical fields. The minimum across critical fields
+gives a more honest signal of whether the invoice needs review.
+
 ## Non-Functional Considerations
 
 - **Cost:** Document AI Invoice Parser is approximately $0.10/page.

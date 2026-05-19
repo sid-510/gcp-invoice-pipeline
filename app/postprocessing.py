@@ -156,3 +156,147 @@ def validate_gstin(candidate: str) -> dict:
         }
 
     return {"valid": True, "normalized": normalized, "reason": "ok"}
+
+# --- total_amount handling ---------------------------------------------
+
+
+def _parse_currency(raw: str) -> float | None:
+    """
+    Parse a currency-shaped string into a float.
+
+    Handles common Indian invoice formats:
+      "2,720.00"  -> 2720.0
+      "4190"      -> 4190.0
+      "₹ 7,150"   -> 7150.0
+      " 6059.34 " -> 6059.34
+
+    Returns None if the string cannot be parsed as a number.
+
+    Args:
+        raw: The string to parse. None or non-string inputs return None.
+    """
+    if not isinstance(raw, str):
+        return None
+
+    # Strip whitespace and common currency markers.
+    # We keep digits, decimal points, and minus signs.
+    cleaned = raw.strip()
+    cleaned = cleaned.replace(",", "")  # remove thousand separators
+    cleaned = cleaned.replace("₹", "")
+    cleaned = cleaned.replace("Rs.", "")
+    cleaned = cleaned.replace("Rs", "")
+    cleaned = cleaned.replace("INR", "")
+    cleaned = cleaned.strip()
+
+    if not cleaned:
+        return None
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _find_entity(entities: list, entity_type: str) -> dict | None:
+    """Return the first entity with the given type, or None."""
+    for entity in entities:
+        if entity.get("type") == entity_type:
+            return entity
+    return None
+
+
+def extract_total_amount(entities: list) -> dict:
+    """
+    Extract a clean numeric total_amount from Document AI entities.
+
+    Tries multiple strategies in order of reliability:
+      1. Parse the `total_amount` entity's value as a number
+      2. Parse the `total_amount` entity's normalized_value as a number
+      3. Find the largest single-number line_item (typically the grand
+         total appears as a standalone numeric line item near the bottom)
+      4. Compute net_amount + total_tax_amount if both parse cleanly
+      5. Return None and flag for manual review
+
+    Args:
+        entities: The list of entity dicts from extract_invoice() output.
+
+    Returns:
+        A dict with:
+          - "value": float | None, the extracted total
+          - "source": str, which strategy produced the value
+          - "confidence": float | None, the confidence to record
+            (the Document AI entity confidence if used, or None for
+            derived values)
+          - "needs_review": bool, True if manual review is recommended
+    """
+    total_entity = _find_entity(entities, "total_amount")
+
+    # Strategy 1: parse the primary value
+    if total_entity:
+        parsed = _parse_currency(total_entity.get("value", ""))
+        if parsed is not None:
+            return {
+                "value": parsed,
+                "source": "total_amount.value",
+                "confidence": total_entity.get("confidence"),
+                "needs_review": False,
+            }
+
+        # Strategy 2: parse the normalized_value
+        parsed = _parse_currency(total_entity.get("normalized_value", ""))
+        if parsed is not None:
+            return {
+                "value": parsed,
+                "source": "total_amount.normalized_value",
+                "confidence": total_entity.get("confidence"),
+                "needs_review": False,
+            }
+
+    # Strategy 3: find the largest single-number line_item.
+    # The grand total typically appears as a standalone currency entry
+    # in the line_items section (e.g., "7,150.00"). Multi-field product
+    # rows ("ITEM 1 BOX 550.00 6059.34") won't parse as a single number
+    # and are naturally filtered out.
+    line_item_amounts = []
+    for entity in entities:
+        if entity.get("type") == "line_item":
+            parsed = _parse_currency(entity.get("value", ""))
+            if parsed is not None:
+                line_item_amounts.append(parsed)
+
+    if line_item_amounts:
+        max_amount = max(line_item_amounts)
+        return {
+            "value": max_amount,
+            "source": "max_line_item",
+            "confidence": None,
+            "needs_review": True,
+        }
+
+    # Strategy 4: compute from net_amount + total_tax_amount
+    net_entity = _find_entity(entities, "net_amount")
+    tax_entity = _find_entity(entities, "total_tax_amount")
+
+    if net_entity and tax_entity:
+        net = _parse_currency(net_entity.get("value", "")) or _parse_currency(
+            net_entity.get("normalized_value", "")
+        )
+        tax = _parse_currency(tax_entity.get("value", "")) or _parse_currency(
+            tax_entity.get("normalized_value", "")
+        )
+
+        if net is not None and tax is not None:
+            return {
+                "value": round(net + tax, 2),
+                "source": "computed_net_plus_tax",
+                "confidence": None,
+                "needs_review": True,
+            }
+
+    # Strategy 5: give up
+    return {
+        "value": None,
+        "source": "no_extraction",
+        "confidence": None,
+        "needs_review": True,
+    }

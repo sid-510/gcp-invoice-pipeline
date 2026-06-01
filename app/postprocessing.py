@@ -390,3 +390,169 @@ def lookup_vendor(gstin: str, fallback_name: str = "") -> dict:
         "source": "fallback_from_extraction",
         "needs_review": True,
     }
+
+# --- tax breakdown extraction ------------------------------------------
+
+
+# Pattern matches: <TAX_NAME> followed by any non-digit characters,
+# then a number that's either decimal-formatted or has 3+ digits.
+# This skips through vendor-specific labels like "OP", "OUTPUT", "9%"
+# without us having to enumerate them.
+#
+# Known limitation: tax values under 100 with no decimal point will be
+# missed. Acceptable for the family business's typical invoice values.
+
+
+
+def _find_tax_in_line_items(entities: list, tax_name: str) -> float | None:
+    """
+    Search line_item values for a tax pattern and return the largest
+    numeric value found near that tax name, or None if no match.
+
+    Strategy: find any line_item containing the tax name (case-insensitive),
+    then extract ALL number-like substrings from that line_item and return
+    the largest one. The largest number is almost always the actual tax
+    amount; small numbers like "9" or "9%" are GST percentages.
+
+    Args:
+        entities: The list of entity dicts from Document AI output.
+        tax_name: One of "cgst", "sgst", "igst" (lowercase).
+
+    Returns:
+        The largest tax amount found, or None if no line_item mentions
+        this tax or no parseable numbers exist.
+    """
+    tax_upper = tax_name.upper()
+    # Match any number with a decimal point, or any 3+ digit number.
+    # Same logic as before, but used to find ALL candidates, not just the first.
+    number_pattern = re.compile(r"\d[\d,]*\.\d+|\d{3,}[\d,]*")
+
+    best_value = None
+
+    for entity in entities:
+        if entity.get("type") != "line_item":
+            continue
+
+        value = entity.get("value", "")
+        # Skip line_items that don't mention this tax at all
+        if tax_upper not in value.upper():
+            continue
+
+        # Find all candidate numbers in this line_item
+        candidates = number_pattern.findall(value)
+        for candidate in candidates:
+            parsed = _parse_currency(candidate)
+            if parsed is not None:
+                if best_value is None or parsed > best_value:
+                    best_value = parsed
+
+    return best_value
+
+def extract_tax_breakdown(entities: list) -> dict:
+    """
+    Extract the CGST, SGST, and IGST tax components from Document AI
+    entities.
+
+    Indian GST invoices have either (CGST + SGST) for intra-state sales
+    or (IGST) for inter-state sales, never both. For consistency, this
+    function always returns all three fields, defaulting missing ones
+    to 0.0.
+
+    Strategies in order:
+      1. Find each tax in line_items via regex
+      2. If total_tax_amount is present and exactly two of the three
+         are still missing, split it equally between CGST and SGST
+         (Indian GST law mandates these be equal for intra-state)
+      3. Default missing values to 0.0
+
+    Args:
+        entities: The list of entity dicts from extract_invoice() output.
+
+    Returns:
+        A dict with:
+          - "cgst_amount": float
+          - "sgst_amount": float
+          - "igst_amount": float
+          - "source": str describing which strategy was used per tax
+          - "needs_review": bool, True if any fallback strategy was used
+    """
+    cgst = _find_tax_in_line_items(entities, "cgst")
+    sgst = _find_tax_in_line_items(entities, "sgst")
+    igst = _find_tax_in_line_items(entities, "igst")
+
+    sources = {}
+    needs_review = False
+
+    # Record source for each tax found directly
+    if cgst is not None:
+        sources["cgst"] = "line_item_regex"
+    if sgst is not None:
+        sources["sgst"] = "line_item_regex"
+    if igst is not None:
+        sources["igst"] = "line_item_regex"
+
+    # Strategy 1b: if exactly one of CGST/SGST was found and IGST is absent,
+    # use total_tax_amount to recover the missing one. Indian GST law mandates
+    # CGST == SGST on intra-state sales, so total_tax/2 should equal the found value.
+    # If it does, we can confidently set the missing one to the same.
+    one_of_cgst_sgst_missing = (
+        (cgst is None) != (sgst is None)  # exactly one is None
+        and igst is None
+    )
+    if one_of_cgst_sgst_missing:
+        tax_entity = _find_entity(entities, "total_tax_amount")
+        if tax_entity:
+            total_tax = _parse_currency(tax_entity.get("value", "")) or _parse_currency(
+                tax_entity.get("normalized_value", "")
+            )
+            known_value = cgst if cgst is not None else sgst
+            if total_tax is not None and known_value is not None:
+                # Allow small floating-point tolerance
+                if abs(total_tax / 2 - known_value) < 0.02:
+                    if cgst is None:
+                        cgst = known_value
+                        sources["cgst"] = "inferred_from_total_tax"
+                    if sgst is None:
+                        sgst = known_value
+                        sources["sgst"] = "inferred_from_total_tax"
+                    needs_review = True
+
+    # Strategy 2: split total_tax_amount if we have it but no individual taxes
+    if cgst is None and sgst is None and igst is None:
+        tax_entity = _find_entity(entities, "total_tax_amount")
+        if tax_entity:
+            total_tax = _parse_currency(tax_entity.get("value", "")) or _parse_currency(
+                tax_entity.get("normalized_value", "")
+            )
+            if total_tax is not None and total_tax > 0:
+                # Assume intra-state: split equally between CGST and SGST.
+                # Inter-state IGST would already have been caught by Strategy 1.
+                half = round(total_tax / 2, 2)
+                cgst = half
+                sgst = half
+                sources["cgst"] = "split_from_total_tax"
+                sources["sgst"] = "split_from_total_tax"
+                needs_review = True
+
+    # Default any missing values to 0.0
+    if cgst is None:
+        cgst = 0.0
+        sources["cgst"] = "default_zero"
+        needs_review = True
+    if sgst is None:
+        sgst = 0.0
+        sources["sgst"] = "default_zero"
+        needs_review = True
+    if igst is None:
+        igst = 0.0
+        sources["igst"] = "default_zero"
+        # Don't flag for review just because IGST is zero — most invoices
+        # are intra-state and IGST being zero is expected.
+
+    return {
+        "cgst_amount": cgst,
+        "sgst_amount": sgst,
+        "igst_amount": igst,
+        "source": sources,
+        "needs_review": needs_review,
+    }

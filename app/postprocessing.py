@@ -300,3 +300,93 @@ def extract_total_amount(entities: list) -> dict:
         "confidence": None,
         "needs_review": True,
     }
+
+# --- vendor lookup ------------------------------------------------------
+
+import json
+from pathlib import Path
+
+
+# Path to the lookup file, resolved relative to this module's location
+# so it works regardless of where the Python process was started from.
+_VENDOR_LOOKUP_PATH = Path(__file__).parent / "config" / "vendor_lookup.json"
+
+
+def _load_vendor_lookup() -> dict:
+    """
+    Load the GSTIN-to-vendor-name mapping from disk.
+
+    Loaded once at module import time. If the file is missing or empty,
+    returns an empty dict (no known vendors yet). This is a normal state
+    for a fresh install — vendors get added as invoices are processed.
+    """
+    if not _VENDOR_LOOKUP_PATH.exists():
+        logger.warning(
+            "Vendor lookup file not found at %s — starting with empty lookup",
+            _VENDOR_LOOKUP_PATH,
+        )
+        return {}
+
+    try:
+        with open(_VENDOR_LOOKUP_PATH) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        logger.error(
+            "Vendor lookup file is invalid JSON: %s — starting with empty lookup",
+            e,
+        )
+        return {}
+
+    # Filter out comment keys (keys starting with underscore are reserved
+    # for documentation in the JSON file, not real vendor entries).
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+# Load the lookup table once when this module is imported.
+# Restart the application to pick up changes to the lookup file.
+_VENDOR_LOOKUP = _load_vendor_lookup()
+
+
+def lookup_vendor(gstin: str, fallback_name: str = "") -> dict:
+    """
+    Map a GSTIN to its canonical vendor name via the lookup table.
+
+    Args:
+        gstin: A validated GSTIN string.
+        fallback_name: The supplier_name extracted by Document AI.
+                       Used when the GSTIN is not in the lookup table.
+
+    Returns:
+        A dict with:
+          - "canonical_name": str, the name to use for this vendor
+          - "is_known_vendor": bool, True if found in the lookup table
+          - "source": str, "lookup" or "fallback_from_extraction"
+          - "needs_review": bool, True if this is a new vendor that
+            should be added to the lookup table
+    """
+    if not isinstance(gstin, str) or not gstin:
+        return {
+            "canonical_name": fallback_name,
+            "is_known_vendor": False,
+            "source": "fallback_from_extraction",
+            "needs_review": True,
+        }
+
+    normalized_gstin = gstin.strip().upper()
+
+    if normalized_gstin in _VENDOR_LOOKUP:
+        return {
+            "canonical_name": _VENDOR_LOOKUP[normalized_gstin],
+            "is_known_vendor": True,
+            "source": "lookup",
+            "needs_review": False,
+        }
+
+    # New vendor — use the Document AI-extracted name as fallback and
+    # flag for human review to add to the lookup table.
+    return {
+        "canonical_name": fallback_name,
+        "is_known_vendor": False,
+        "source": "fallback_from_extraction",
+        "needs_review": True,
+    }

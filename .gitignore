@@ -18,13 +18,19 @@ env/
 .pytest_cache/
 
 # Credentials (CRITICAL - never commit these)
-*.json
-!package.json
+# Block known credential filename patterns rather than all JSON
 service-account-*.json
 gcp-key*.json
+*-credentials.json
+*-credentials*.json
+google-credentials*.json
 .env
 .env.*
 credentials/
+
+# Application config that may contain real business data
+app/config/vendor_lookup.json
+app/.env
 
 # Sample / real test data - never commit
 app/test_invoices/

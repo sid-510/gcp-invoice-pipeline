@@ -1,0 +1,6 @@
+{
+  "_comment": "Maps GSTIN to canonical vendor name. Add new vendors as they appear.",
+  "_example_only": "Real values live in vendor_lookup.json which is gitignored",
+  "27AABCT1332L1ZD": "Example Vendor Name Pvt Ltd",
+  "29ABCDE1234F1Z5": "Another Example Vendor"
+}
